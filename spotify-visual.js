@@ -69,7 +69,7 @@
     for(const get of [window.cancelEsperantoCall,window._getSpotifyModule]){
       if(typeof get!=='function')continue;
       try{const a=get.call(window,'ctewh');if(a&&typeof a.query==='function'&&typeof a.setLayered==='function'&&typeof a.setTransparent==='function'&&typeof a.setBackdrop==='function'){
-        const q=a.query();if(q&&q.allowuntested!==true)return {a,q};
+        const q=a.query();if(q&&(q.options?.allowuntested??q.allowuntested)!==true)return {a,q};
       }}catch(e){}
     }
     return null;
@@ -93,7 +93,12 @@
     try{
       const result=bridge();if(!result)throw Error('Windhawk indisponível ou versão não reconhecida.');
       const {a,q}=result;
-      if(mode==='acrylic'&&(q.showframe!==false||q.transparentrendering!==true||q.isDwmEnabled!==true))throw Error('Acrylic requer renderização transparente, molduras nativas desligadas e DWM ativo.');
+      if(mode==='acrylic'){
+        const options=q.options??q;
+        if(options.showframe!==false)throw Error('Desative as molduras nativas no Windhawk e reinicie o Spotify.');
+        if(options.transparentrendering!==true)throw Error('Ative a renderização transparente no Windhawk e reinicie o Spotify.');
+        if(q.isDwmEnabled!==true)throw Error('O compositor DWM não está disponível segundo o Windhawk.');
+      }
       if(nativeMode!==mode){resetNative();nativeAPI=a;
         if(mode==='transparent'){a.setTransparent(false);a.setBackdrop('none');a.setLayered(true,Math.round(alpha*255/100));}
         else{a.setLayered(false);a.setTransparent(true);a.setBackdrop('acrylic');if(a.query().isTransparent!==true)throw Error('O mod não confirmou a transparência.');root.classList.add('sv-acrylic');}
