@@ -1,6 +1,6 @@
 {
-  "version": "2.5.6",
+  "version": "2.5.7",
   "file": "spotify-visual.js",
-  "sha256": "685d639c9d8b72b9f3c5c8a7a71792d2bd96539a56592fa2afa14f0255fe4118",
-  "commit": "f2cce57e5dea64acf971bfc44b37c6116ab0043f"
+  "sha256": "a632cd3cbea43118052181adcf8643b723592c3dc8ae0b538a67c0b95e443344",
+  "commit": "8c8e9f02b140cecae3ac7f9fe9dce199bd646738"
 }
