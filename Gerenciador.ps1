@@ -6,7 +6,7 @@ $log=Join-Path $homeDir 'atualizacoes.log'
 $mod='cef-titlebar-enabler-universal'
 $disabled=Test-Path (Join-Path $homeDir 'desativar-atualizacoes.txt')
 function Log($m){Add-Content -LiteralPath $log -Encoding UTF8 -Value "$(Get-Date -Format s) $m"; Write-Host $m}
-function Alert($m){Add-Type -AssemblyName System.Windows.Forms; [void][System.Windows.Forms.MessageBox]::Show([string]$m,'Spotify Visual 3.0.2','OK','Warning')}
+function Alert($m){Add-Type -AssemblyName System.Windows.Forms; [void][System.Windows.Forms.MessageBox]::Show([string]$m,'Spotify Visual 3.0.3','OK','Warning')}
 function Running {return [bool](Get-Process Spotify -ErrorAction SilentlyContinue)}
 function Find-Spice {
     $c=Get-Command spicetify.exe -ErrorAction SilentlyContinue
@@ -149,13 +149,15 @@ try{
         $prev=if(Test-Path $spiceStamp){Get-Content -LiteralPath $spiceStamp -Raw}else{''}
         if($Mode -eq 'Install' -or $prev.Trim() -ne $v -or ((Get-Date)-(Get-Item $spiceStamp -ErrorAction SilentlyContinue).LastWriteTime).TotalHours -ge 24){
             try{
-                if($spice -ieq (Join-Path $env:LOCALAPPDATA 'spicetify\spicetify.exe')){[void](Exec $spice @('upgrade') -AllowFail)}
+                if($spice -ieq (Join-Path $env:LOCALAPPDATA 'spicetify\spicetify.exe')){[void](Exec $spice @('upgrade','--no-restart') -AllowFail)}
                 elseif($spice -match '\\WinGet\\' -and (Get-Command winget.exe -ErrorAction SilentlyContinue)){[void](Exec (Get-Command winget.exe).Source @('upgrade','--id','Spicetify.Spicetify','--exact','--source','winget','--silent','--disable-interactivity') -AllowFail)}
                 $spice=Find-Spice
             }catch{Log ('Spicetify update: '+$_.Exception.Message)}
             Set-Content -LiteralPath $spiceStamp -Value $v
         }
-        Setup-Wh
+        # Preserve an already working mod; only provision when absent.
+        $script:wh=WhPath
+        if($script:wh){$status=Wh @('mod','show',$mod) -AllowFail;if($status.code -ne 0){Setup-Wh}}else{Setup-Wh}
     }
     if(Running){throw 'Feche Spotify para aplicar as atualizacoes.'}
     $cfg=Join-Path $env:APPDATA 'spicetify\config-xpui.ini'
@@ -165,35 +167,53 @@ try{
     New-Item -ItemType Directory -Path $ext -Force|Out-Null
     $dest=Join-Path $ext 'spotify-visual.js'
     $state=Join-Path $homeDir 'visual-release.json'
+    $installed=Join-Path $apps 'xpui\extensions\spotify-visual.js'
+    $m=$null
+    Log ('Gerenciador 3.0.3; arquivo fonte: '+$dest)
     if(-not $disabled){
         $tmp=Join-Path $homeDir ('ext-'+[guid]::NewGuid().ToString('N')+'.js')
         try{
-            $m=Invoke-RestMethod -Uri ($base+'update.json') -TimeoutSec 8 -MaximumRedirection 0
+            $m=Invoke-RestMethod -Uri ($base+'update.json?check='+[guid]::NewGuid().ToString('N')) -TimeoutSec 15 -MaximumRedirection 0
+            Log ('Versao disponivel: '+$m.version)
             if($m.file -cne 'spotify-visual.js' -or $m.sha256 -notmatch '^[0-9a-fA-F]{64}$' -or $m.version -notmatch '^\d+\.\d+\.\d+$'){throw 'Manifesto da extensao invalido.'}
             $old=if(Test-Path $state){try{[version](Get-Content $state -Raw|ConvertFrom-Json).version}catch{[version]'0.0.0'}}else{[version]'0.0.0'}
             $actual=if(Test-Path $dest){(Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash}else{''}
             if([version]$m.version -ge $old -and $actual -ine $m.sha256){
-                Invoke-WebRequest -Uri ($base+'spotify-visual.js') -UseBasicParsing -OutFile $tmp -TimeoutSec 15 -MaximumRedirection 0
+                Invoke-WebRequest -Uri ($base+'spotify-visual.js?sha='+$m.sha256) -UseBasicParsing -OutFile $tmp -TimeoutSec 30 -MaximumRedirection 0
                 if((Get-Item $tmp).Length -gt 1048576 -or (Get-FileHash $tmp -Algorithm SHA256).Hash -ine $m.sha256){throw 'Integridade da extensao invalida.'}
                 if(Test-Path $dest){$backup=Join-Path $homeDir 'extensao-anterior.js';Copy-Item $dest $backup -Force}
                 Copy-Item $tmp $dest -Force
                 $pending=$true
+                Log ('Extensao baixada e verificada: '+$m.version)
             }
-        }catch{Log ('Extensao: '+$_.Exception.Message)}
+        }catch{Log ('Extensao: '+$_.Exception.Message);Alert ('Nao foi possivel buscar a atualizacao: '+$_.Exception.Message+'. A copia local sera usada.');$m=$null}
         finally{Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue}
     }
     if(-not(Test-Path $dest)){throw 'Extensao indisponivel. Verifique a conexao e tente novamente.'}
-    if($Mode -eq 'Install' -or $pending -or -not(Test-Path $cfg) -or (Get-Content $cfg -Raw) -notmatch '(?m)^extensions\s*=.*spotify-visual\.js'){
+    $register = -not(Test-Path $cfg) -or (Get-Content $cfg -Raw) -notmatch '(?m)^\s*extensions\s*=.*spotify-visual\.js'
+    if($register){
         if(Test-Path $cfg){Copy-Item $cfg (Join-Path $homeDir 'config-antes-3.ini') -Force}
-        [void](Exec $spice @('config','extensions','noir-rose.js-'))
-        [void](Exec $spice @('config','current_theme','""','inject_css','0','replace_colors','0'))
         [void](Exec $spice @('config','extensions','spotify-visual.js'))
     }
-    if(($pending -or $Mode -eq 'Install') -and -not(Test-Path (Join-Path $apps 'xpui.spa'))){
+    if(Running){throw 'Feche Spotify antes de atualizar a extensao.'}
+    # Auto only prepares an unmodified Spotify; it may skip already applied assets.
+    [void](Exec $spice @('auto','--no-restart'))
+    $sourceHash=(Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
+    $installedHash=if(Test-Path -LiteralPath $installed){(Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash}else{''}
+    if($register){
         [void](Exec $spice @('apply','--no-restart'))
+    }elseif($sourceHash -ine $installedHash){
+        Log 'Copia ativa diferente da fonte; atualizando extensoes explicitamente.'
+        [void](Exec $spice @('refresh','-e','--no-restart'))
     }
-    [void](Exec $spice @('auto'))
-    if($pending){@{version=[string]$m.version;sha256=$m.sha256}|ConvertTo-Json|Set-Content $state -Encoding UTF8}
+    if(-not(Test-Path -LiteralPath $installed) -or (Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash -ine $sourceHash){
+        throw 'A copia ativa do Spotify nao corresponde a extensao local.'
+    }
+    if($m -and $sourceHash -ieq $m.sha256){
+        @{version=[string]$m.version;sha256=$m.sha256}|ConvertTo-Json|Set-Content -LiteralPath $state -Encoding UTF8
+        Log ('Extensao aplicada e verificada: '+$m.version)
+    }else{Log ('Copia local aplicada e verificada: '+$sourceHash)}
+    Start-Process -FilePath $spotify
     exit 0
 }catch{
     Log ('ERRO: '+$_.Exception.Message)
