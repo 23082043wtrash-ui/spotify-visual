@@ -15,7 +15,7 @@ function Shortcut($name,$action){
     $l.TargetPath=Join-Path $PSHOME 'powershell.exe'
     $l.Arguments='-NoProfile -ExecutionPolicy Bypass -File "'+(Join-Path $dir 'Bootstrap.ps1')+'" -Mode '+$action
     $l.WorkingDirectory=$dir
-    $l.WindowStyle=7
+    $l.WindowStyle=1
     $spotify=Join-Path $env:APPDATA 'Spotify\Spotify.exe'
     if(Test-Path $spotify){$l.IconLocation=$spotify+',0'}
     $l.Save()
@@ -36,20 +36,21 @@ $stage=$null
 try{
     try{$locked=$mutex.WaitOne(0)}catch [System.Threading.AbandonedMutexException]{$locked=$true}
     if(-not $locked){Alert 'O atualizador ja esta em execucao.';return}
-    Log ('Inicializador 3.0.4: '+$Mode)
+    Log ('Inicializador 3.0.5: '+$Mode)
     if(Get-Process Spotify -ErrorAction SilentlyContinue){
         throw 'Spotify ainda aberto. Feche-o completamente, inclusive na bandeja, e abra este atalho novamente para verificar atualizacoes.'
     }
+    if($Mode -eq 'Install' -and (Test-Path (Join-Path $dir 'desativar-atualizacoes.txt'))){throw 'Atualizacoes pausadas pelo arquivo desativar-atualizacoes.txt. Remova-o se deseja reativar.'}
     if($Mode -ne 'Safe' -and ($Mode -eq 'Install' -or -not(Test-Path (Join-Path $dir 'desativar-atualizacoes.txt')))){
         try{
             [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
-            $m=Invoke-RestMethod -Uri ($base+'gerenciador.json?check='+[guid]::NewGuid().ToString('N')) -TimeoutSec 20 -MaximumRedirection 0
+            $m=(Invoke-WebRequest -UseBasicParsing -Uri ($base+'gerenciador.json?check='+[guid]::NewGuid().ToString('N')) -TimeoutSec 20 -Headers @{'Cache-Control'='no-cache'}).Content | ConvertFrom-Json
             Log ('Gerenciador disponivel: '+$m.version)
             if($m.file -cne 'Gerenciador.ps1' -or $m.version -notmatch '^\d+\.\d+\.\d+$' -or $m.sha256 -notmatch '^[0-9a-fA-F]{64}$'){throw 'Manifesto invalido.'}
             $local=if(Test-Path $state){try{[version](Get-Content $state -Raw|ConvertFrom-Json).version}catch{[version]'0.0.0'}}else{[version]'0.0.0'}
             $current=if(Test-Path $worker){(Get-FileHash $worker -Algorithm SHA256).Hash}else{''}
             $bad=if(Test-Path $blocked){(Get-Content $blocked -Raw).Trim()}else{''}
-            if([version]$m.version -ge $local -and $current -ine $m.sha256 -and ($bad -ine $m.sha256 -or $Mode -eq 'Install')){
+            if(($Mode -eq 'Install' -or [version]$m.version -ge $local) -and $current -ine $m.sha256 -and ($bad -ine $m.sha256 -or $Mode -eq 'Install')){
                 $stage=Join-Path $dir ('gerenciador-'+[guid]::NewGuid().ToString('N')+'.ps1')
                 $url=$base+'Gerenciador.ps1?sha='+$m.sha256
                 if($m.commit -match '^[a-f0-9]{40}$'){$url='https://raw.githubusercontent.com/23082043wtrash-ui/spotify-visual/'+$m.commit+'/Gerenciador.ps1'}
@@ -79,6 +80,7 @@ try{
         if($PSCommandPath -ine $installed){if(Test-Path -LiteralPath $installed){Copy-Item -LiteralPath $installed -Destination ($installed+'.bak') -Force};Copy-Item -LiteralPath $PSCommandPath -Destination $installed -Force}
         Shortcut 'Spotify Visual' 'Open'
         Shortcut 'Spotify Visual - modo seguro' 'Safe'
+        Shortcut 'Spotify Visual - atualizar' 'Install'
         Log 'Atalhos atualizados.'
     }
     & (Join-Path $PSHOME 'powershell.exe') -NoProfile -ExecutionPolicy Bypass -File $worker -Mode $Mode
@@ -97,7 +99,7 @@ try{
         }
         exit $code
     }
-    if($changed){
+    if($m -and (Get-FileHash -LiteralPath $worker -Algorithm SHA256).Hash -ieq $m.sha256){
         @{version=[string]$m.version;sha256=$m.sha256}|ConvertTo-Json|Set-Content -LiteralPath $state -Encoding UTF8
         Remove-Item -LiteralPath $blocked -Force -ErrorAction SilentlyContinue
         Log ('Gerenciador instalado: '+$m.version)
