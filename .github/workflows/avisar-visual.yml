@@ -1,0 +1,21 @@
+name: Avisar Spotify Visual
+on:
+  push:
+    branches: [main]
+    paths:
+      - update.json
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Enviar sinal de nova publicacao
+        run: |
+          curl --fail-with-body --silent --show-error --retry 2 --max-time 20 \
+            -H 'Title: Spotify Visual' \
+            -H 'Cache: yes' \
+            --data-binary 'release' \
+            'https://ntfy.sh/spotify-visual-release-8d9f42b61a7e4cb083e5f63ad951c2b7'
