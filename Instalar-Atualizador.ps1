@@ -35,24 +35,25 @@ $blocked=Join-Path $dir 'gerenciador-bloqueado.txt'
 $stage=$null
 try{
     try{$locked=$mutex.WaitOne(0)}catch [System.Threading.AbandonedMutexException]{$locked=$true}
-    if(-not $locked){return}
+    if(-not $locked){Alert 'O atualizador ja esta em execucao.';return}
+    Log ('Inicializador 3.0.4: '+$Mode)
     if(Get-Process Spotify -ErrorAction SilentlyContinue){
-        if($Mode -ne 'Open'){throw 'Feche o Spotify completamente, inclusive na bandeja.'}
-        $spotify=Join-Path $env:APPDATA 'Spotify\Spotify.exe'
-        if(Test-Path $spotify){Start-Process -FilePath $spotify}
-        return
+        throw 'Spotify ainda aberto. Feche-o completamente, inclusive na bandeja, e abra este atalho novamente para verificar atualizacoes.'
     }
     if($Mode -ne 'Safe' -and ($Mode -eq 'Install' -or -not(Test-Path (Join-Path $dir 'desativar-atualizacoes.txt')))){
         try{
             [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
-            $m=Invoke-RestMethod -Uri ($base+'gerenciador.json') -TimeoutSec 8 -MaximumRedirection 0
+            $m=Invoke-RestMethod -Uri ($base+'gerenciador.json?check='+[guid]::NewGuid().ToString('N')) -TimeoutSec 20 -MaximumRedirection 0
+            Log ('Gerenciador disponivel: '+$m.version)
             if($m.file -cne 'Gerenciador.ps1' -or $m.version -notmatch '^\d+\.\d+\.\d+$' -or $m.sha256 -notmatch '^[0-9a-fA-F]{64}$'){throw 'Manifesto invalido.'}
             $local=if(Test-Path $state){try{[version](Get-Content $state -Raw|ConvertFrom-Json).version}catch{[version]'0.0.0'}}else{[version]'0.0.0'}
             $current=if(Test-Path $worker){(Get-FileHash $worker -Algorithm SHA256).Hash}else{''}
             $bad=if(Test-Path $blocked){(Get-Content $blocked -Raw).Trim()}else{''}
             if([version]$m.version -ge $local -and $current -ine $m.sha256 -and ($bad -ine $m.sha256 -or $Mode -eq 'Install')){
                 $stage=Join-Path $dir ('gerenciador-'+[guid]::NewGuid().ToString('N')+'.ps1')
-                Invoke-WebRequest -Uri ($base+'Gerenciador.ps1') -UseBasicParsing -OutFile $stage -TimeoutSec 15 -MaximumRedirection 0
+                $url=$base+'Gerenciador.ps1?sha='+$m.sha256
+                if($m.commit -match '^[a-f0-9]{40}$'){$url='https://raw.githubusercontent.com/23082043wtrash-ui/spotify-visual/'+$m.commit+'/Gerenciador.ps1'}
+                Invoke-WebRequest -Uri $url -UseBasicParsing -OutFile $stage -TimeoutSec 30 -MaximumRedirection 0
                 if((Get-Item $stage).Length -gt 1048576 -or (Get-FileHash $stage -Algorithm SHA256).Hash -ine $m.sha256){throw 'Integridade do gerenciador invalida.'}
                 $tokens=$null;$errors=$null
                 [void][System.Management.Automation.Language.Parser]::ParseFile($stage,[ref]$tokens,[ref]$errors)
@@ -64,7 +65,7 @@ try{
                 $changed=$true
                 Log ('Gerenciador preparado: '+$m.version)
             }
-        }catch{Log ('Atualizacao ignorada: '+$_.Exception.Message)}
+        }catch{Log ('Atualizacao ignorada: '+$_.Exception.Message);if($Mode -eq 'Install'){throw};Alert ('Falha na atualizacao do gerenciador: '+$_.Exception.Message+'. A versao local sera usada.')}
     }
     if(-not(Test-Path $worker)){
         if($Mode -eq 'Safe'){
@@ -75,9 +76,10 @@ try{
     }
     if($Mode -eq 'Install'){
         $installed=Join-Path $dir 'Bootstrap.ps1'
-        if($PSCommandPath -ine $installed){Copy-Item -LiteralPath $PSCommandPath -Destination $installed -Force}
+        if($PSCommandPath -ine $installed){if(Test-Path -LiteralPath $installed){Copy-Item -LiteralPath $installed -Destination ($installed+'.bak') -Force};Copy-Item -LiteralPath $PSCommandPath -Destination $installed -Force}
         Shortcut 'Spotify Visual' 'Open'
         Shortcut 'Spotify Visual - modo seguro' 'Safe'
+        Log 'Atalhos atualizados.'
     }
     & (Join-Path $PSHOME 'powershell.exe') -NoProfile -ExecutionPolicy Bypass -File $worker -Mode $Mode
     $code=$LASTEXITCODE
