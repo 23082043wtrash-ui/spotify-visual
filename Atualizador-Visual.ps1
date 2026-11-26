@@ -1,6 +1,6 @@
-# Spotify Visual - Atualizador independente v4.0.1
+# Spotify Visual - Atualizador independente v4.1.0
 # Runs as the current user. Does not install or update Windhawk/Spicetify.
-param([ValidateSet('Install','Open','Check')][string]$Mode='Open')
+param([ValidateSet('Install','Open','Check','Listen')][string]$Mode='Open')
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 $dir=Join-Path $env:LOCALAPPDATA 'SpotifyVisual'
@@ -8,9 +8,11 @@ $installedScript=Join-Path $dir 'Atualizador-Visual.ps1'
 $taskName='Spotify Visual - Atualizacao automatica'
 $log=Join-Path $dir 'atualizacoes.log'
 $base='https://raw.githubusercontent.com/23082043wtrash-ui/spotify-visual/'
+$topic='https://ntfy.sh/spotify-visual-release-8d9f42b61a7e4cb083e5f63ad951c2b7/json?since=latest'
+$listenerVbs=Join-Path $dir 'Receber-Avisos.vbs'
 New-Item -ItemType Directory -Path $dir -Force|Out-Null
 function Log([string]$message){
-    $line="$(Get-Date -Format s) [Visual 4.0.1/$Mode] $message"
+    $line="$(Get-Date -Format s) [Visual 4.1.0/$Mode] $message"
     Add-Content -LiteralPath $log -Value $line -Encoding UTF8
     Write-Host $line
 }
@@ -72,6 +74,89 @@ function MakeShortcut([string]$name,[string]$action){
     $link.IconLocation=$script:spotify+',0'
     $link.Save()
 }
+
+function Notify([string]$message){
+    try{
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+        $n=New-Object Windows.Forms.NotifyIcon
+        try{
+            $n.Icon=[Drawing.SystemIcons]::Information
+            $n.Visible=$true
+            $n.BalloonTipTitle='Spotify Visual'
+            $n.BalloonTipText=$message
+            $n.ShowBalloonTip(4000)
+            Start-Sleep -Milliseconds 1800
+        }finally{$n.Dispose()}
+    }catch{Log ('Notificacao indisponivel: '+$_.Exception.Message)}
+}
+function InvokeQuietCheck {
+    $p=New-Object Diagnostics.ProcessStartInfo
+    $p.FileName=Join-Path $PSHOME 'powershell.exe'
+    $p.Arguments='-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$installedScript+'" -Mode Check'
+    $p.UseShellExecute=$false
+    $p.CreateNoWindow=$true
+    $child=[Diagnostics.Process]::Start($p)
+    if($child){try{$child.WaitForExit()}finally{$child.Dispose()}}
+}
+function ListenForReleases {
+    $listenerMutex=New-Object System.Threading.Mutex($false,'Local\SpotifyVisualPushListener')
+    $hasLock=$false
+    try{
+        try{$hasLock=$listenerMutex.WaitOne(0)}catch [System.Threading.AbandonedMutexException]{$hasLock=$true}
+        if(-not $hasLock){return}
+        Log 'Receptor push iniciado; sem verificacao periodica de versao.'
+        [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+        # One catch-up check per logon/start, not a periodic polling timer.
+        Start-Sleep -Seconds 3
+        try{InvokeQuietCheck}catch{Log ('Verificacao inicial: '+$_.Exception.Message)}
+        $lastId=''
+        $lastCheck=[DateTime]::UtcNow.AddMinutes(-1)
+        $retry=5
+        while($true){
+            $response=$null;$reader=$null
+            try{
+                $request=[Net.HttpWebRequest]::Create($topic)
+                $request.Method='GET'
+                $request.Timeout=20000
+                $request.ReadWriteTimeout=120000
+                $request.AllowAutoRedirect=$false
+                $request.UserAgent='SpotifyVisual/4.1'
+                $response=$request.GetResponse()
+                $stream=$response.GetResponseStream()
+                if($stream.CanTimeout){$stream.ReadTimeout=120000}
+                $reader=New-Object IO.StreamReader($stream)
+                $retry=5
+                while($null -ne ($line=$reader.ReadLine())){
+                    if($line.Length -gt 8192){continue}
+                    try{$event=$line|ConvertFrom-Json}catch{continue}
+                    if($event.event -ne 'message' -or $event.message -cne 'release' -or -not $event.id -or $event.id -eq $lastId){continue}
+                    $lastId=[string]$event.id
+                    # The public channel is untrusted; never execute payloads.
+                    # Check the fixed official manifest and verify the download.
+                    $elapsed=([DateTime]::UtcNow-$lastCheck).TotalSeconds
+                    if($elapsed -lt 15){Start-Sleep -Seconds ([int][Math]::Ceiling(15-$elapsed))}
+                    $lastCheck=[DateTime]::UtcNow
+                    if(Test-Path -LiteralPath (Join-Path $dir 'desativar-atualizacoes.txt')){continue}
+                    try{InvokeQuietCheck}catch{Log ('Falha ao processar aviso: '+$_.Exception.Message)}
+                }
+            }catch{
+                Log ('Conexao push interrompida: '+$_.Exception.Message)
+            }finally{
+                if($reader){$reader.Dispose()}
+                if($response){$response.Dispose()}
+            }
+            # Reconnect transport only; do not fetch versions on a timer.
+            Start-Sleep -Seconds $retry
+            $retry=[Math]::Min(120,$retry*2)
+        }
+    }finally{
+        if($hasLock){$listenerMutex.ReleaseMutex()}
+        $listenerMutex.Dispose()
+    }
+}
+if($Mode -eq 'Listen'){ListenForReleases;exit 0}
+
 $mutex=New-Object System.Threading.Mutex($false,'Local\SpotifyVisual4Updater')
 $locked=$false
 $tmpManifest=$null
@@ -148,6 +233,7 @@ try{
         Copy-Item -LiteralPath $source -Destination $backup -Force
         Copy-Item -LiteralPath $active -Destination $activeBackup -Force
         $attemptHash=[string]$m.sha256
+        if($Mode -eq 'Check'){Notify ('Nova versao '+$m.version+' verificada. Atualizando agora.')}
         if(Running){$restartNeeded=$true;CloseSpotify}
         if(Running){throw 'Spotify reabriu antes da aplicacao. Nenhum arquivo foi alterado.'}
         $pending=$true
@@ -169,20 +255,37 @@ try{
         Log 'Atalhos reparados. Atalho de modo seguro preservado.'
         try{
             $user=[Security.Principal.WindowsIdentity]::GetCurrent().Name
-            $action=New-ScheduledTaskAction -Execute (Join-Path $PSHOME 'powershell.exe') -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$installedScript+'" -Mode Check')
-            $trigger=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5)
+            $wscript=Join-Path $env:WINDIR 'System32\wscript.exe'
+            if(-not(Test-Path -LiteralPath $wscript)){throw 'Windows Script Host indisponivel.'}
+            $vbs=@'
+Set sh = CreateObject("WScript.Shell")
+q = Chr(34)
+ps = sh.ExpandEnvironmentStrings("%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe")
+f = sh.ExpandEnvironmentStrings("%LOCALAPPDATA%\SpotifyVisual\Atualizador-Visual.ps1")
+sh.Run q & ps & q & " -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File " & q & f & q & " -Mode Listen", 0, True
+'@
+            Set-Content -LiteralPath $listenerVbs -Value $vbs -Encoding ASCII
+            $action=New-ScheduledTaskAction -Execute $wscript -Argument ('//B //Nologo "'+$listenerVbs+'"')
+            $trigger=New-ScheduledTaskTrigger -AtLogOn -User $user
             $taskPrincipal=New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
-            $taskSettings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 3)
+            $taskSettings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Seconds 0)
+            $oldTask=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            if($oldTask -and $oldTask.State -eq 'Running'){Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop}
             Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $taskPrincipal -Settings $taskSettings -Force|Out-Null
-            $null=Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
-            Log 'Tarefa automatica registrada: a cada 5 minutos; fecha e reabre Spotify somente se houver uma atualizacao.'
-            Alert ('Atualizado para '+$m.version+'. Atalhos reparados e tarefa automatica registrada.')
+            $registered=Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+            if(@($registered.Triggers).Count -ne 1 -or $registered.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger'){throw 'A tarefa antiga nao foi substituida corretamente.'}
+            Start-ScheduledTask -TaskName $taskName
+            Log 'Receptor push registrado no logon; tarefa de cinco minutos substituida.'
+            Alert ('Atualizado para '+$m.version+'. Avisos push ativados. O terminal nao sera aberto nas verificacoes.')
         }catch{
-            Log ('Tarefa automatica nao registrada: '+$_.Exception.Message)
-            Alert ('Extensao '+$m.version+' instalada e atalhos reparados. Nao foi possivel registrar verificacao periodica: '+$_.Exception.Message)
+            $taskError=$_.Exception.Message
+            try{Disable-ScheduledTask -TaskName $taskName -ErrorAction Stop|Out-Null;Log 'Tarefa automatica desativada por seguranca.'}catch{Log ('Nao foi possivel desativar tarefa: '+$_.Exception.Message)}
+            Log ('Receptor push nao registrado: '+$taskError)
+            Alert ('Extensao '+$m.version+' instalada. Nao foi possivel ativar avisos push: '+$taskError)
         }
     }
     if(($Mode -ne 'Check' -or $restartNeeded) -and -not(Running)){Start-Process -FilePath $spotify;Log 'Spotify iniciado.'}
+    if($Mode -eq 'Check' -and $attemptHash -and $verified){Notify ('Spotify Visual '+$m.version+' instalado.')}
 }catch{
     Log ('ERRO: '+$_.Exception.Message+' (linha '+$_.InvocationInfo.ScriptLineNumber+')')
     if($attemptHash -and -not $verified){try{Set-Content -LiteralPath $failedRelease -Value $attemptHash -Encoding ASCII}catch{Log ('Falha ao registrar bloqueio: '+$_.Exception.Message)}}
@@ -199,6 +302,7 @@ try{
     }
     $failure=$_.Exception.Message
     if($restartNeeded -and $recoverySafe -and -not(Running)){try{Start-Process -FilePath $spotify;Log 'Spotify reaberto apos falha.'}catch{Log ('Falha ao reabrir: '+$_.Exception.Message)}}
+    if($Mode -eq 'Check' -and $attemptHash){Notify 'Nao foi possivel atualizar. Consulte o log do Spotify Visual.'}
     Alert ('Atualizacao nao concluida: '+$failure+' Log: '+$log)
     if($Mode -ne 'Check'){exit 1}
 }finally{
