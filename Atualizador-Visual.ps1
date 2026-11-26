@@ -1,4 +1,4 @@
-# Spotify Visual - Atualizador independente v4.0.0
+# Spotify Visual - Atualizador independente v4.0.1
 # Runs as the current user. Does not install or update Windhawk/Spicetify.
 param([ValidateSet('Install','Open','Check')][string]$Mode='Open')
 $ErrorActionPreference='Stop'
@@ -10,7 +10,7 @@ $log=Join-Path $dir 'atualizacoes.log'
 $base='https://raw.githubusercontent.com/23082043wtrash-ui/spotify-visual/'
 New-Item -ItemType Directory -Path $dir -Force|Out-Null
 function Log([string]$message){
-    $line="$(Get-Date -Format s) [Visual 4.0.0/$Mode] $message"
+    $line="$(Get-Date -Format s) [Visual 4.0.1/$Mode] $message"
     Add-Content -LiteralPath $log -Value $line -Encoding UTF8
     Write-Host $line
 }
@@ -19,7 +19,33 @@ function Alert([string]$message){
     Add-Type -AssemblyName System.Windows.Forms
     [void][Windows.Forms.MessageBox]::Show($message,'Spotify Visual')
 }
-function Running { return [bool](Get-Process Spotify -ErrorAction SilentlyContinue) }
+# Limit closing to Spotify processes in this interactive Windows session.
+$sessionId=(Get-Process -Id $PID).SessionId
+function SpotifyProcesses {
+    Get-Process -Name Spotify -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -eq $sessionId}
+}
+function Running { return [bool]@(SpotifyProcesses).Count }
+function CloseSpotify {
+    $processes=@(SpotifyProcesses)
+    if($processes.Count -eq 0){return}
+    Log ('Fechando '+$processes.Count+' processo(s) do Spotify para aplicar nova versao.')
+    foreach($p in $processes){
+        try{if($p.MainWindowHandle -ne 0){[void]$p.CloseMainWindow()}}catch{}
+    }
+    $deadline=(Get-Date).AddSeconds(6)
+    while((Running) -and (Get-Date) -lt $deadline){Start-Sleep -Milliseconds 250}
+    $deadline=(Get-Date).AddSeconds(10)
+    while(Running){
+        foreach($p in @(SpotifyProcesses)){
+            try{Stop-Process -Id $p.Id -Force -ErrorAction Stop}catch{
+                if(Get-Process -Id $p.Id -ErrorAction SilentlyContinue){throw}
+            }
+        }
+        Start-Sleep -Milliseconds 300
+        if((Running) -and (Get-Date) -ge $deadline){throw 'Nao foi possivel fechar todas as instancias do Spotify.'}
+    }
+    Log 'Spotify encerrado.'
+}
 function Hash([string]$path){
     if(Test-Path -LiteralPath $path -PathType Leaf){return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash}
     return ''
@@ -52,6 +78,10 @@ $tmpManifest=$null
 $tmpExt=$null
 $pending=$false
 $verified=$false
+$restartNeeded=$false
+$recoverySafe=$true
+$attemptHash=$null
+$failedRelease=Join-Path $dir 'visual-atualizacao-falhou.txt'
 $source=$null
 $active=$null
 $backup=$null
@@ -62,11 +92,6 @@ try{
     if($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Execute no PowerShell normal, sem administrador.'}
     try{$locked=$mutex.WaitOne(0)}catch [System.Threading.AbandonedMutexException]{$locked=$true}
     if(-not $locked){if($Mode -ne 'Check'){Alert 'Ja existe uma verificacao em andamento. Abra o atalho novamente.'};return}
-    if(Running){
-        if($Mode -eq 'Check'){return}
-        if($Mode -eq 'Open'){Log 'Spotify ja aberto; verificacao adiada.';Start-Process -FilePath $spotify;return}
-        throw 'Feche Spotify completamente antes de instalar o atualizador.'
-    }
     Log 'Inicio da verificacao.'
     if(Test-Path -LiteralPath (Join-Path $dir 'desativar-atualizacoes.txt')){
         throw 'Atualizacoes pausadas pelo arquivo desativar-atualizacoes.txt. Remova-o somente se quiser reativar.'
@@ -111,20 +136,27 @@ try{
     $actHash=Hash $active
     Log ('SHA fonte: '+$srcHash+'; SHA ativo: '+$actHash)
     if($srcHash -ine $m.sha256 -or $actHash -ine $m.sha256){
+        if($Mode -eq 'Check' -and (Test-Path -LiteralPath $failedRelease)){
+            $failed=(Get-Content -LiteralPath $failedRelease -Raw).Trim()
+            if($failed -ieq $m.sha256){Log 'Esta versao falhou anteriormente; use o atalho atualizar para tentar novamente.';return}
+        }
         $tmpExt=Join-Path $dir ('ext-'+[guid]::NewGuid().ToString('N')+'.js')
         Invoke-WebRequest -UseBasicParsing -Uri ($base+$m.commit+'/spotify-visual.js') -TimeoutSec 30 -OutFile $tmpExt
         if((Get-Item -LiteralPath $tmpExt).Length -gt 1048576 -or (Hash $tmpExt) -ine $m.sha256){throw 'Integridade da extensao invalida.'}
-        if(Running){throw 'Spotify foi aberto durante o download; nenhuma alteracao aplicada.'}
         $backup=Join-Path $dir 'visual-fonte-antes.js'
         $activeBackup=Join-Path $dir 'visual-ativo-antes.js'
         Copy-Item -LiteralPath $source -Destination $backup -Force
         Copy-Item -LiteralPath $active -Destination $activeBackup -Force
+        $attemptHash=[string]$m.sha256
+        if(Running){$restartNeeded=$true;CloseSpotify}
+        if(Running){throw 'Spotify reabriu antes da aplicacao. Nenhum arquivo foi alterado.'}
         $pending=$true
         Copy-Item -LiteralPath $tmpExt -Destination $source -Force
         Spice @('refresh','-e','--no-restart')
         if((Hash $source) -ine $m.sha256 -or (Hash $active) -ine $m.sha256){throw 'Refresh nao atualizou a copia ativa. Nenhum apply completo sera forcado.'}
     }
     $verified=$true
+    Remove-Item -LiteralPath $failedRelease -Force -ErrorAction SilentlyContinue
     @{version=[string]$m.version;sha256=$m.sha256}|ConvertTo-Json|Set-Content -LiteralPath $state -Encoding UTF8
     Log ('Extensao aplicada e verificada: '+$m.version)
     if($Mode -eq 'Install'){
@@ -143,26 +175,31 @@ try{
             $taskSettings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 3)
             Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $taskPrincipal -Settings $taskSettings -Force|Out-Null
             $null=Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
-            Log 'Tarefa automatica registrada: a cada 5 minutos, somente com Spotify fechado.'
+            Log 'Tarefa automatica registrada: a cada 5 minutos; fecha e reabre Spotify somente se houver uma atualizacao.'
             Alert ('Atualizado para '+$m.version+'. Atalhos reparados e tarefa automatica registrada.')
         }catch{
             Log ('Tarefa automatica nao registrada: '+$_.Exception.Message)
             Alert ('Extensao '+$m.version+' instalada e atalhos reparados. Nao foi possivel registrar verificacao periodica: '+$_.Exception.Message)
         }
     }
-    if($Mode -ne 'Check'){Start-Process -FilePath $spotify}
+    if(($Mode -ne 'Check' -or $restartNeeded) -and -not(Running)){Start-Process -FilePath $spotify;Log 'Spotify iniciado.'}
 }catch{
     Log ('ERRO: '+$_.Exception.Message+' (linha '+$_.InvocationInfo.ScriptLineNumber+')')
+    if($attemptHash -and -not $verified){try{Set-Content -LiteralPath $failedRelease -Value $attemptHash -Encoding ASCII}catch{Log ('Falha ao registrar bloqueio: '+$_.Exception.Message)}}
     if($pending -and -not $verified){
+        $recoverySafe=$false
         try{
             if(Running){throw 'Spotify aberto; backups preservados para recuperacao manual.'}
             Copy-Item -LiteralPath $backup -Destination $source -Force
             Copy-Item -LiteralPath $activeBackup -Destination $active -Force
             if((Hash $source) -ine (Hash $backup) -or (Hash $active) -ine (Hash $activeBackup)){throw 'Hashes da recuperacao divergentes.'}
+            $recoverySafe=$true
             Log 'Copias anteriores restauradas.'
         }catch{Log ('ERRO DE RECUPERACAO: '+$_.Exception.Message)}
     }
-    Alert ('Atualizacao nao concluida: '+$_.Exception.Message+' Log: '+$log)
+    $failure=$_.Exception.Message
+    if($restartNeeded -and $recoverySafe -and -not(Running)){try{Start-Process -FilePath $spotify;Log 'Spotify reaberto apos falha.'}catch{Log ('Falha ao reabrir: '+$_.Exception.Message)}}
+    Alert ('Atualizacao nao concluida: '+$failure+' Log: '+$log)
     if($Mode -ne 'Check'){exit 1}
 }finally{
     if($tmpManifest){Remove-Item -LiteralPath $tmpManifest -Force -ErrorAction SilentlyContinue}
