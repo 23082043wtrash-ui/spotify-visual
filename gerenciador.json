@@ -1,6 +1,6 @@
 {
-  "version": "3.0.4",
+  "version": "3.0.5",
   "file": "Gerenciador.ps1",
-  "sha256": "8838be48af2cd4ce1f42b8a069e489a2ab4d3a70287a29438f1d0e9863ce4b63",
-  "commit": "9a3b197b4926aa248e891063fca9e4ec8809ba86"
+  "sha256": "d1177cdab72c70584984759834e4f2b9c9b09deb6e3426158a4559d7f27a05fc",
+  "commit": "35946d92f2b047e92fd1e1d5996b20fe906d7b1a"
 }
